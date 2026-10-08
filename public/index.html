@@ -1532,10 +1532,10 @@ function opView(id){
   const bar=`<div class="optabs" role="tablist" aria-label="Open play sections">${tabs.map(t=>`<button type="button" role="tab" id="optab-${t}" aria-selected="${t===cur}" aria-controls="oppanel" tabindex="${t===cur?0:-1}" data-a="opTab" data-v="${t}">${lab[t]}${bd(t)}</button>`).join("")}</div>`;
   const chatPane=member?`<div class="sheet gcs opchat">${ctxChip("Open Play: "+when(e.ts))}${pinWrap(ck,e.isHost)}${cWrap(ck)}${composer(ck,"Message the group")}</div>`:`<div class="sheet"><h2>Group chat</h2><p class="empty">Join this open play to read and write in the chat.</p></div>`;
   let pane="";
-  if(cur==="details")pane=info+hostQr+(e.st==="open"?host:"")+(done?rank+results:"");
+  if(cur==="details")pane=info+hostQr+(e.st==="open"?host+pb:"")+(done?rank+results:"");
   else if(cur==="chat")pane=chatPane;
   else if(cur==="players")pane=ppl;
-  else pane=(live?host+courts+rank+results:"");
+  else pane=(live?host+pb+courts+rank+results:"");
   const main=bar+`<div id="oppanel" role="tabpanel" aria-labelledby="optab-${cur}" tabindex="-1">${pane}</div>`;
   return hdr+banner+(wide?`<div class="opgrid"><div class="opl">${main}</div><aside class="opr" aria-label="Group chat">${chatPane}</aside></div>`:main);
 }
