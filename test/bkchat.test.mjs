@@ -1,0 +1,29 @@
+// v8.22: lesson chat between a coach and the player of a booking (text + photos), nobody else.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fresh } from "./helpers/harness.mjs";
+
+const IP = "198.51.100.97", PNG = "data:image/png;base64,iVBORw0KGgo=";
+test("booking chat: coach and booked player only, photos ok, unread count, cancelled is read-only", async () => {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" });
+  const at = (await c.ok("login", { username: "admin", password: "x-admin-pw" })).token;
+  const ci = (await c.ok("invite", {}, at)).msg.replace("Invite: ", "");
+  const coach = await c.register("coachb", IP); await c.ok("redeem", { token: ci }, coach);
+  const ann = await c.player("annb", "198.51.100.11"), zed = await c.player("zedb", "198.51.100.12");
+  await c.ok("addSession", { kind: "lesson", ts: Date.now() + 5 * 36e5, title: "Dinks", loc: "Test Courts", price: 0 }, coach);
+  await c.ok("book", { sessionId: (await c.ok("state", {}, ann)).sessions.find(x => x.left > 0).id }, ann);
+  const bk = (await c.ok("state", {}, ann)).bookings[0];
+  const call = (a, b, t) => c.call(a, b, t, IP);
+  assert.equal((await call("gcSend", { kind: "bk", id: bk.id, text: "", img: PNG }, coach)).status, 200, "coach photo");
+  assert.equal((await call("gcSend", { kind: "bk", id: bk.id, text: "see you at 5" }, ann)).status, 200);
+  assert.equal((await call("gcGet", { kind: "bk", id: bk.id }, zed)).status, 404, "stranger blocked");
+  assert.equal((await call("gcSend", { kind: "bk", id: bk.id, text: "hi" }, zed)).status, 404);
+  const cs = await c.ok("state", {}, coach);
+  assert.equal(cs.coach.bookings.find(x => x.id === bk.id).un, 1, "coach has 1 unread (ann's reply)");
+  const g = await call("gcGet", { kind: "bk", id: bk.id, seen: 1 }, coach);
+  assert.equal(g.body.msgs.length, 2);
+  assert.equal((await c.ok("state", {}, coach)).coach.bookings.find(x => x.id === bk.id).un, 0);
+  await c.ok("cancel", { id: bk.id }, ann);
+  assert.equal((await call("gcSend", { kind: "bk", id: bk.id, text: "late" }, coach)).status, 403, "cancelled: no new messages");
+  assert.equal((await call("gcGet", { kind: "bk", id: bk.id }, coach)).status, 200, "still readable");
+});

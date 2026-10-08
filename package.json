@@ -1,0 +1,17 @@
+{
+  "name": "pickleup",
+  "private": true,
+  "version": "8.29.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --import ./test/helpers/setup.mjs --test --test-force-exit test/*.test.mjs"
+  },
+  "dependencies": {
+    "@netlify/blobs": ">=8.2.0"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}
