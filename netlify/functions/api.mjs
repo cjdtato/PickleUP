@@ -33,6 +33,10 @@ const trim = (arr, max, keep) => {
   if (arr.length > max) arr.splice(0, arr.length - max);
 };
 // ---- Concurrency: optimistic compare-and-swap with retry (Netlify Blobs conditional writes) ----
+// ---- Coach ratings (store "cr"): one rating per player per coach session, editable for 7 days
+const RLOCK = 7 * 864e5;
+const myRt = (cr, b) => { const r = cr.find(x => x.player === b.player && x.session === (b.sid || b.id)); return r ? { stars: r.stars, text: r.text, ts: r.ts, edited: !!r.edited, lock: Date.now() - r.ts > RLOCK } : null; };
+const aggOf = (cr, coach) => { const l = cr.filter(x => x.coach === coach), n = l.length; return { avg: n ? Math.round(l.reduce((t, x) => t + x.stars, 0) / n * 100) / 100 : 0, n }; };
 class Bad extends Error { constructor(m, st = 400) { super(m); this.st = st; } }
 const SKIP = Symbol("skip");
 let warned = false;
@@ -389,6 +393,18 @@ function pairedFour(order, pr) {
   };
   const a = team(), b = a && team(); return a && b ? [...a, ...b] : null;
 }
+// Fallback when whole pairs cannot fill a game (for example an odd number of unpaired players): keep the first player in the game,
+// take whole pairs before single players, and seat each pair together so as few pairs as possible are split.
+function mixedFour(order, pr) {
+  const taken = new Set(), pairsIn = [], singles = [];
+  for (const x of order) {
+    if (taken.has(x) || taken.size >= 4) continue;
+    const m = pr.get(x);
+    if (m != null && !taken.has(m) && taken.size + 2 <= 4 && order.includes(m)) { taken.add(x); taken.add(m); pairsIn.push(x, m); }
+    else { taken.add(x); singles.push(x); }
+  }
+  return [...pairsIn, ...singles];
+}
 // Top up the queue until every paid player has e.rounds games. Fewest games first, ties broken at random, teams split at random.
 function opFill(e) {
   const ps = inPlay(e).map(x => x.id);
@@ -399,7 +415,11 @@ function opFill(e) {
   for (let n = 0; n < 400; n++) {
     const order = shuffle(ps.slice()).sort((x, y) => cnt.get(x) - cnt.get(y)); // stable sort: the shuffle decides ties
     if (cnt.get(order[0]) >= e.rounds) break;
-    const four = (pr.size && pairedFour(order, pr)) || shuffle(order.slice(0, 4));
+    let four = pr.size && pairedFour(order, pr);
+    if (!four) {
+      four = pr.size ? mixedFour(order, pr) : shuffle(order.slice(0, 4));
+      if (pr.size && four.some((id, i) => pr.has(id) && pr.get(id) !== four[i ^ 1])) e.pw = (e.pw | 0) + 1; // a fixed pair had to be split in this game
+    }
     four.forEach(id => cnt.set(id, cnt.get(id) + 1));
     e.g.push({ id: uid(), n: ++e.seq, p: four, court: null, st: "q" });
   }
@@ -427,6 +447,7 @@ function opRank(e) {
   return [...m.values()].filter(r => r.g || e.pl.some(x => x.id === r.id && x.paid && !x.left))
     .sort((a, b) => b.w - a.w || (b.pf - b.pa) - (a.pf - a.pa) || b.pf - a.pf || a.n.localeCompare(b.n));
 }
+const sesSt = x => x.status === "cancelled" ? "cancelled" : Date.now() >= x.ts + (x.dur || 60) * 6e4 ? "ended" : Date.now() >= x.ts ? "live" : "open";
 // ---- Venue (court details + map pin), shared by open plays and coach sessions ----
 // Stored as { a: address, lat, lng (both null when there is no pin), set: indoor|outdoor|covered, sf: surface, ct: court number/area, am: [facilities], nt: notes }.
 const VEN_SET = ["indoor", "outdoor", "covered"], VEN_SF = ["dedicated", "concrete", "asphalt", "wood", "tile", "other"];
@@ -448,7 +469,7 @@ const opLine = (e, me) => ({ id: e.id, club: e.club || null, cn: e.cn || "", mod
   mine: e.host === me.id, joined: e.pl.some(x => x.id === me.id && !x.left), paid: e.pl.some(x => x.id === me.id && x.paid && !x.left) });
 function opDetail(e, me) {
   const host = e.host === me.id, joined = e.pl.some(x => x.id === me.id && !x.left), done = e.g.filter(g => g.st === "d");
-  return { id: e.id, club: e.club || null, cn: e.cn || "", mode: e.mode || "casual", fp: !!e.fp, sw: !!e.sw, pairs: e.pairs || [], skill: e.skill || "All levels", applied: !!e.applied, title: e.title, desc: e.desc, loc: e.loc, ven: e.ven || null, ts: e.ts, dur: e.dur, price: e.price, pay: host || joined ? e.pay : "", cap: e.cap, courts: e.courts, rounds: e.rounds,
+  return { id: e.id, club: e.club || null, cn: e.cn || "", mode: e.mode || "casual", fp: !!e.fp, sw: !!e.sw, pairs: e.pairs || [], pw: e.pw | 0, skill: e.skill || "All levels", applied: !!e.applied, title: e.title, desc: e.desc, loc: e.loc, ven: e.ven || null, ts: e.ts, dur: e.dur, price: e.price, pay: host || joined ? e.pay : "", cap: e.cap, courts: e.courts, rounds: e.rounds,
     st: e.status, host: e.host, hn: e.hn, isHost: host, joined, now: Date.now(), qr: !!e.qr,
     pl: e.pl.filter(x => !x.left || e.g.some(g => g.p.includes(x.id)) || (host && x.cr)).map(x => ({ id: x.id, n: x.n, paid: !!x.paid, here: here(e, x), out: !!x.out, left: !!x.left, cr: !!x.cr, me: x.id === me.id, ref: host || x.id === me.id ? x.ref || "" : "" })),
     g: [...e.g.filter(g => g.st !== "d"), ...done.slice(-30)].map(g => ({ id: g.id, n: g.n, p: g.p, c: g.court, st: g.st, sa: g.sa, sb: g.sb, cf: g.cf || null })),
@@ -502,6 +523,12 @@ async function history(s, u, max = 50) {
   (u.hist || []).filter(h => !seen.has(h.m)).forEach(h => rows.push({ t: h.t, k: "ranked", pt: h.pt, op: h.op, s: h.s, w: h.w, d: h.d, nr: !!h.nr, ex: h.ex }));
   return rows.sort((a, b) => b.t - a.t).slice(0, max);
 }
+// Top Rated Coaches: a coach is ranked once they have MINR ratings. Order: average (to 2 decimals), then more ratings, then older account.
+const MINR = 5;
+async function coachRanks(s) {
+  const cs = (await loadAll(s)).filter(u => u.role === "certified_coach" && !u.disabled && u.rating && u.rating.n >= MINR);
+  return cs.sort((x, y) => Math.round(y.rating.avg * 100) - Math.round(x.rating.avg * 100) || y.rating.n - x.rating.n || x.created - y.created);
+}
 // Public profile: what any club member can see about another player.
 async function profile(s, id, self) {
   const u = await getU(s, id);
@@ -510,8 +537,9 @@ async function profile(s, id, self) {
   const cls = cl.filter(c => isMember(c, u.id)).map(clubRef), ids = [...new Set(hs.flatMap(h => [h.pt, ...h.op]))], known = new Map(rows.map(r => [r.id, r.n]));
   // one cached board read covers most names; only players missing from it (disabled, brand new) cost a user read
   const names = new Map(await Promise.all(ids.map(async i => [i, known.get(i) || (await getU(s, i))?.username || "Former player"])));
+  const isC = u.role === "certified_coach", top1 = isC && (await coachRanks(s))[0]?.id === u.id;
   return { id: u.id, n: u.username, a: u.av || undefined, cv: u.cv || undefined, r: rated(u) ? u.r : null, pr: rated(u) ? null : rtg(u), ip: u.ip || 0, rel: reliability(u), w: u.w | 0, l: u.l | 0,
-    t: tierOf(u), badges: u.badges, coach: u.role === "certified_coach", src: u.src || null, since: u.created, sk: u.sk || null, xp: u.xp,
+    t: tierOf(u), badges: u.badges, coach: isC, rating: isC ? (u.rating || { avg: 0, n: 0 }) : undefined, top1: top1 || undefined, src: u.src || null, since: u.created, sk: u.sk || null, xp: u.xp,
     clubs: cls,
     hist: hs.map(h => ({ t: h.t, rm: h.rm, s: h.s, d: h.d, w: h.w, nr: !!h.nr, ex: h.ex, k: h.k, ot: h.ot, pt: names.get(h.pt), op: h.op.map(i => names.get(i)) })) };
 }
@@ -562,7 +590,7 @@ async function clubDetail(s, me, id) {
 async function snapshot(s, me, cfg, full, pre = {}) {
   const names = new Map(), nm = id => { if (!names.has(id)) names.set(id, getU(s, id).then(u => u?.username || "?")); return names.get(id); };
   const [ms, q, bk, hw, co, bd, ss, fr, ops, cls] = await Promise.all([pre.m || jget(s, "m", []), pre.q || jget(s, "q", []), jget(s, "bk", []), jget(s, "hw", []), coaches(s), board(s), jget(s, "ss", []), frOf(s, me.id), jget(s, "op", []), jget(s, "cl", [])]);
-  const qf = q.filter(fresh), live = bk.filter(b => b.status !== "cancelled"), sm = new Map(ss.map(x => [x.id, x])), cn = new Map(co.map(c => [c.id, c.n])), cp = new Map(co.map(c => [c.id, c.pay]));
+  const crs = (me.role !== "player" || bk.some(b => b.player === me.id && b.status === "attended")) ? await jget(s, "cr", []) : [], qf = q.filter(fresh), live = bk.filter(b => b.status !== "cancelled"), sm = new Map(ss.map(x => [x.id, x])), cn = new Map(co.map(c => [c.id, c.n])), cp = new Map(co.map(c => [c.id, c.pay]));
   const mm = ms.filter(m => m.p.includes(me.id) && m.status !== "done" && Date.now() - m.start < 3 * 36e5).pop();
   const out = {
     me: pub(me), avs: Object.fromEntries(bd.filter(r => r.a).map(r => [r.n, r.a])), tiers: TIERS, badgeDefs: BADGES, streak: streakNow(me, cfg.tz), bestStreak: me.st ? me.st.best | 0 : 0, weekly: weekly(me, cfg.tz), today: todays(cfg.tz).map(x => ({ ...x, done: me.done.includes(x.id) })),
@@ -587,7 +615,7 @@ async function snapshot(s, me, cfg, full, pre = {}) {
       const n = live.filter(b => b.sid === x.id);
       return { id: x.id, coach: cn.get(x.coach) || "Coach", kind: x.kind, ts: x.ts, title: x.title, loc: x.loc || "", ven: x.ven || null, price: x.price, dur: x.dur || 60, left: x.cap - n.length, mine: n.some(b => b.player === me.id), own: x.coach === me.id };
     }),
-    bookings: await Promise.all(bk.filter(b => b.player === me.id).slice(-10).map(async b => ({ ...b, un: await bkUn(s, me, b), cn: await nm(b.coach), pay: cp.get(b.coach) || "", dur: b.dur || sm.get(b.sid)?.dur || 60, title: sm.get(b.sid)?.title || b.kind, loc: sm.get(b.sid)?.loc || "", ven: sm.get(b.sid)?.ven || null }))),
+    bookings: await Promise.all(bk.filter(b => b.player === me.id).slice(-10).map(async b => ({ ...b, rt: myRt(crs, b), un: await bkUn(s, me, b), cn: await nm(b.coach), pay: cp.get(b.coach) || "", dur: b.dur || sm.get(b.sid)?.dur || 60, title: sm.get(b.sid)?.title || b.kind, loc: sm.get(b.sid)?.loc || "", ven: sm.get(b.sid)?.ven || null }))),
     homework: await Promise.all(hw.filter(h => h.student === me.id).slice(-15).map(async h => ({ ...h, cn: await nm(h.coach) }))),
     board: bd.filter(u => u.r != null).slice(0, 25).map(u => ({ ...u, me: u.id === me.id })),
     friends: { f: fr.f.map(x => ({ ...x, la: bd.find(r => r.id === x.id)?.la || 0 })).sort((a, b) => (b.lm | 0) - (a.lm | 0) || a.n.localeCompare(b.n)), i: fr.i, o: fr.o }, unread: fr.f.reduce((t, x) => t + (x.un | 0), 0),
@@ -610,17 +638,22 @@ async function snapshot(s, me, cfg, full, pre = {}) {
     // roster = durable list on the coach record (survives booking-log trimming) + anything still in the log
     const mine = bk.filter(b => b.coach === me.id), sid = [...new Set([...(me.stu || []), ...mine.filter(b => b.status === "attended").map(b => b.player)])];
     out.coach = {
+      rating: aggOf(crs, me.id),
+      reviews: await Promise.all(crs.filter(x => x.coach === me.id).slice(-30).reverse().map(async x => ({ id: x.id, stars: x.stars, text: x.text, ts: x.ts, fl: !!x.fl, pn: await nm(x.player) }))),
       bookings: await Promise.all(mine.slice(-30).reverse().map(async b => ({ ...b, un: await bkUn(s, me, b), pn: await nm(b.player), title: sm.get(b.sid)?.title }))),
       students: (await Promise.all(sid.map(id => getU(s, id)))).filter(Boolean).map(u => ({ id: u.id, n: u.username, t: tierOf(u), r: rated(u) ? u.r : null })),
       hw: await Promise.all(hw.filter(h => h.coach === me.id).slice(-30).reverse().map(async h => ({ ...h, sn: await nm(h.student) }))),
       sessions: ss.filter(x => x.coach === me.id && x.status === "open" && x.ts > Date.now() - 36e5).sort((a, b) => a.ts - b.ts).slice(0, 40)
-        .map(x => ({ id: x.id, kind: x.kind, ts: x.ts, dur: x.dur || 60, title: x.title, loc: x.loc || "", ven: x.ven || null, price: x.price, cap: x.cap, booked: live.filter(b => b.sid === x.id).length })),
+        .map(x => ({ id: x.id, kind: x.kind, ts: x.ts, dur: x.dur || 60, title: x.title, loc: x.loc || "", ven: x.ven || null, price: x.price, cap: x.cap, booked: live.filter(b => b.sid === x.id).length, st: sesSt(x) })),
+      recent: ss.filter(x => x.coach === me.id && x.ts > Date.now() - 7 * 864e5 && (x.status === "cancelled" || (x.status === "open" && x.ts <= Date.now() - 36e5))).sort((a, b) => b.ts - a.ts).slice(0, 10)
+        .map(x => ({ id: x.id, kind: x.kind, ts: x.ts, dur: x.dur || 60, title: x.title, st: sesSt(x), att: mine.filter(b => b.sid === x.id && b.status === "attended").length, n: mine.filter(b => b.sid === x.id && b.status !== "cancelled").length })),
       who: Object.fromEntries(await Promise.all([...new Set(live.filter(b => b.coach === me.id).map(b => b.sid))].map(async sid => [sid, await Promise.all(live.filter(b => b.sid === sid).map(b => nm(b.player)))]))),
       revenue: mine.filter(b => b.paid && b.status !== "cancelled").reduce((t, b) => t + (b.price | 0), 0),
       due: mine.filter(b => !b.paid && b.status !== "cancelled").reduce((t, b) => t + (b.price | 0), 0) };
   }
   if (me.role === "admin") {
     out.admin = { cfg };
+    out.admin.rflags = await Promise.all(crs.filter(x => x.fl).slice(-20).map(async x => ({ id: x.id, stars: x.stars, text: x.text, cn: await nm(x.coach), pn: await nm(x.player) })));
     out.admin.flags = await Promise.all([...ms.filter(m => m.flag), ...(await jget(s, "fl", []))].slice(-8).map(async m => ({ id: m.id, names: await Promise.all(m.p.map(id => nm(id))) })));
     if (full) out.admin.users = (await loadAll(s)).map(u => { const p = pub(u); delete p.hist; return p; });
   }
@@ -1053,7 +1086,7 @@ async function handle(req, context) {
     await hit(s, "ch:" + me.id, 6e4);
     let msgs, gone = [];
     if (im) await s.set("ci/" + im, b.img);
-    await mutate(s, key, [], m => { gone = []; m.push({ f: me.id, n: me.username, t: Date.now(), x: text, ...(im ? { im } : {}) }); if (m.length > 200) gone = m.splice(0, m.length - 200); msgs = m.slice(-100); });
+    await mutate(s, key, [], m => { gone = []; m.push({ f: me.id, n: me.username, t: Math.max(Date.now(), (m.length ? m[m.length - 1].t + 1 : 0)), x: text, ...(im ? { im } : {}) }); if (m.length > 200) gone = m.splice(0, m.length - 200); msgs = m.slice(-100); });
     await Promise.all(gone.filter(x => x.im).map(x => s.delete("ci/" + x.im).catch(() => {}))); // photos of trimmed messages go too
     await lrSet(s, me.id, lk, msgs.at(-1).t); // writing counts as reading
     return J({ title, msgs, lr: msgs.at(-1).t, un: 0, pin: pinOut(pin) });
@@ -1226,12 +1259,13 @@ async function handle(req, context) {
         const x = e.pl.find(z => z.id === me.id && !z.left);
         if (!x) throw new Bad("Join this open play first, then scan the code");
         if (Date.now() < e.ts - 2 * 36e5) throw new Bad("Check-in opens 2 hours before the start");
+        if (!x.paid) throw new Bad("Pay the host first. You can check in once the host marks you paid.");
         if (!x.ci) x.ci = Date.now();
         x.out = 0; // scanning again after checking out brings you back
         opSync(e);
       });
       const mine = e.pl.find(z => z.id === me.id);
-      return ok(mine && mine.paid ? "Checked in. You're in the games." : "Checked in. Pay the host to get into the games.", { od: opDetail(e, me) });
+      return ok("Checked in. You're in the games.", { od: opDetail(e, me) });
     }
     if (a === "opJoin") {
       e = await mutOp(s, id, async e => {
@@ -1282,8 +1316,8 @@ async function handle(req, context) {
         hostOnly(e);
         const x = e.pl.find(z => z.id === pid && !z.left);
         if (!x || x.id === e.host) throw new Bad("Player not found");
-        x.paid = !x.paid; msg = x.paid ? `${x.n} is in` : `${x.n} marked unpaid`;
-        if (!x.paid) dropOpen(e, x.id);
+        x.paid = !x.paid; msg = x.paid ? `${x.n} is paid. You can check them in now.` : `${x.n} marked unpaid and checked out`;
+        if (!x.paid) { dropOpen(e, x.id); x.ci = 0; x.out = 0; e.pairs = (e.pairs || []).filter(q => !q.includes(x.id)); } // unpaid players cannot stay checked in or paired
         opSync(e);
       });
     } else if (a === "opArrive") { // host fallback when a phone can't scan
@@ -1291,6 +1325,7 @@ async function handle(req, context) {
         hostOnly(e);
         const x = e.pl.find(z => z.id === pid && !z.left);
         if (!x || x.id === e.host) throw new Bad("Player not found");
+        if (!x.paid) throw new Bad(`${x.n} has not paid yet. Mark them paid first, then check them in.`);
         x.ci = x.ci || Date.now(); x.out = 0; msg = `${x.n} checked in`;
         opSync(e);
       });
@@ -1300,14 +1335,24 @@ async function handle(req, context) {
         if (e.status !== "open" && e.status !== "live") throw new Bad("This open play is over");
         if (!e.fp) throw new Bad("Fixed pairing is not allowed in this open play", 400);
         e.pairs = e.pairs || [];
-        if (a === "opUnpair") { e.pairs = e.pairs.filter(q => !q.includes(pid)); msg = "Pair removed. New games use random partners."; }
+        if (a === "opUnpair") { e.pairs = e.pairs.filter(q => !q.includes(pid)); msg = e.status === "live" ? "Pair removed. Waiting games were rebuilt." : "Pair removed. New games use random partners."; }
         else {
-          const x = String(b.a || ""), y = String(b.b || ""), ok = z => e.pl.some(q => q.id === z && !q.left);
-          if (x === y || !ok(x) || !ok(y)) throw new Bad("Pick two different players from this open play");
+          const x = String(b.a || ""), y = String(b.b || ""), ok = z => inPlay(e).some(q => q.id === z);
+          if (x === y || !ok(x) || !ok(y)) throw new Bad("Only players who are paid and checked in can be paired. Pick two different players.");
           if (e.pairs.some(q => q.includes(x) || q.includes(y))) throw new Bad("One of them is already in a pair. Remove that pair first.");
-          e.pairs.push([x, y]); msg = "Pair saved. It applies to games added to the queue from now on.";
+          e.pairs.push([x, y]); msg = e.status === "live" ? "Pair saved. Waiting games were rebuilt with this pair." : "Pair saved. It will be used when the games start.";
         }
+        if (e.status === "live") { e.g = e.g.filter(g => g.st !== "q"); e.pw = 0; } // games already on court or finished stay; the waiting ones are rebuilt
         opSync(e);
+      });
+    } else if (a === "opOpt") { // host: turn fixed pairing or player swapping on/off at any time
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        if (e.status !== "open" && e.status !== "live") throw new Bad("This open play is over");
+        const k = String(b.k || "");
+        if (k !== "fp" && k !== "sw") throw new Bad("Unknown option");
+        e[k] = !e[k]; if (k === "fp" && !e.fp) e.pairs = [];
+        msg = (k === "fp" ? "Fixed pairing" : "Player swapping") + (e[k] ? " is on" : " is off");
       });
     } else if (a === "opSwap") { // host: change a player in a waiting game (only when the session allows it)
       e = await mutOp(s, id, e => {
@@ -1319,9 +1364,11 @@ async function handle(req, context) {
         if (!g.p.includes(o) || g.p.includes(n) || o === n) throw new Bad("Pick one player in this game and a different player");
         if (!inPlay(e).some(x => x.id === n)) throw new Bad("That player is not checked in and paid");
         if (e.g.some(z => z.st === "p" && z.p.includes(n))) throw new Bad("That player is on a court right now");
+        if ((e.pairs || []).some(q => q.includes(o) || q.includes(n))) throw new Bad("One of them is in a fixed pair. Remove the pair first.");
         const h = e.g.find(z => z !== g && z.st === "q" && z.p.includes(n)); // also in another waiting game: trade places
+        if (h && h.p.includes(o)) throw new Bad("Both are in the same other waiting game. Swap inside that game instead.");
         g.p[g.p.indexOf(o)] = n; if (h) h.p[h.p.indexOf(n)] = o;
-        msg = "Players swapped";
+        msg = h ? `Players swapped. Game #${h.n} was also changed so nobody plays twice.` : "Players swapped";
         opSync(e);
       });
     } else if (a === "opHostIn" || a === "opHostOut") { // the host checks themselves in to play, or out again
@@ -1458,8 +1505,45 @@ async function handle(req, context) {
     return ok(msg, { od: opDetail(e, me) });
   }
 
-  if (["attend", "assess", "assign", "approve", "addSession", "cancelSession", "paid", "setPay", "sesCode"].includes(a)) {
+  if (a === "rateCoach") { // a player who attended a coach session rates it once; editable for 7 days
+    const stars = b.stars, text = String(b.text || "").trim().slice(0, 280);
+    if (!Number.isInteger(stars) || stars < 1 || stars > 5) return E("Choose 1 to 5 stars");
+    const k = (await jget(s, "bk", [])).find(x => x.id === String(b.id || "") && x.player === me.id);
+    if (!k) return E("Booking not found", 404);
+    if (k.coach === me.id) return E("You cannot rate yourself", 403);
+    if (k.status !== "attended") return E("You can rate your coach after you attend the session", 403);
+    const sess = k.sid || k.id; let msg = "Thanks for rating your coach", agg;
+    await mutate(s, "cr", [], cr => {
+      const r = cr.find(x => x.player === me.id && x.session === sess);
+      if (r) { if (Date.now() - r.ts > RLOCK) throw new Bad("This rating is locked (7 days have passed)", 403); r.stars = stars; r.text = text; r.edited = true; msg = "Rating updated"; }
+      else cr.push({ id: uid(), coach: k.coach, session: sess, player: me.id, stars, text, ts: Date.now(), edited: false });
+      agg = aggOf(cr, k.coach);
+    });
+    await mutU(s, k.coach, u => { u.rating = agg; });
+    return ok(msg);
+  }
+  if (a === "coachBoard") { // anyone signed in: top 10 plus the caller's own position when they are a coach
+    const cs = await coachRanks(s), cu = await getU(s, me.id), r = cu.rating || { avg: 0, n: 0 }, i = cs.findIndex(u => u.id === me.id);
+    return J({ min: MINR, total: cs.length,
+      top: cs.slice(0, 10).map((u, k) => ({ rank: k + 1, id: u.id, n: u.username, avg: u.rating.avg, cnt: u.rating.n, me: u.id === me.id })),
+      me: cu.role === "certified_coach" ? { rank: i >= 0 ? i + 1 : null, avg: r.avg, cnt: r.n, need: Math.max(0, MINR - r.n) } : null });
+  }
+  if (a === "coachReviews") { // anyone signed in: names stay private ("A student") except for the coach and admins
+    const id = String(b.coach || me.id), cu = await getU(s, id);
+    if (!cu || cu.role !== "certified_coach") return E("Coach not found", 404);
+    const all = (await jget(s, "cr", [])).filter(x => x.coach === id).reverse(), pg = Math.max(0, b.page | 0), per = 20, see = id === me.id || admin;
+    const reviews = await Promise.all(all.slice(pg * per, (pg + 1) * per).map(async x => ({ id: x.id, stars: x.stars, text: x.text, ts: x.ts, pn: see ? ((await getU(s, x.player))?.username || "A student") : "A student" })));
+    return J({ reviews, rating: cu.rating || { avg: 0, n: 0 }, more: all.length > (pg + 1) * per });
+  }
+
+  if (["attend", "assess", "assign", "approve", "addSession", "cancelSession", "paid", "setPay", "sesCode", "reportReview"].includes(a)) {
     if (!coach) return E("forbidden", 403);
+    if (a === "reportReview") {
+      let found = false;
+      await mutate(s, "cr", [], cr => { const r = cr.find(x => x.id === String(b.id || "") && x.coach === me.id); if (r) { r.fl = 1; found = true; } });
+      if (!found) return E("Review not found", 404);
+      return ok("Reported to the admin");
+    }
     if (a === "setPay") {
       const text = String(b.text || "").trim().slice(0, 120);
       await mutU(s, me.id, u => { u.pay = text; }); await coaches(s, true);
@@ -1542,6 +1626,18 @@ async function handle(req, context) {
 
   // ---- Admin
   if (!admin) return E("forbidden", 403);
+  if (a === "removeReview" || a === "dismissReview") {
+    let coachId, agg;
+    await mutate(s, "cr", [], cr => {
+      const i = cr.findIndex(x => x.id === String(b.id || ""));
+      if (i < 0) throw new Bad("Review not found", 404);
+      coachId = cr[i].coach;
+      if (a === "removeReview") { if (coachId === me.id) throw new Bad("You cannot remove reviews of yourself", 403); cr.splice(i, 1); } else delete cr[i].fl;
+      agg = aggOf(cr, coachId);
+    });
+    await mutU(s, coachId, u => { u.rating = agg; });
+    return ok(a === "removeReview" ? "Review removed" : "Flag dismissed");
+  }
   if (a === "setRole") {
     const id = String(b.id || "");
     if (!ROLE.includes(b.role) || (id === me.id && b.role !== "admin")) return E("invalid");

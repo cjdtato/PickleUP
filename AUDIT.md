@@ -1,29 +1,20 @@
-# PickleUP! v8.26.1 audit
+# PickleUP! v8.32.3 audit status
 
-Scope: `netlify/functions/api.mjs`, `public/` (app, 2 static pages, service worker, manifest), `netlify.toml`, tests.
+Checked by code reading and the test suite (84 of 85 pass; `ui.test.mjs` needs `npm install` for jsdom). Not tested on real phones or a live deploy.
 
-## Verified
-- 71 non-UI tests pass (`core`, `rating`, `social`, `cover`, `clubs`, `audit`, `google`, chat, weekly).
-- `api.mjs` passes `node --check`; no stray `console.log`.
-- Auth: scrypt hashing, HMAC tokens, lockouts, reserved usernames, no default admin password.
-- Signing secret: uses `SESSION_SECRET`, else a random one stored once in Blobs (race-safe).
-- Security headers, CSP (report-only), `/api/*` noindex, robots and sitemap present.
-- Service worker: network-first pages, stale-while-revalidate assets, `/api` never cached.
+## Fixed and confirmed in the code
+- Login lockout per username + IP, plus a per-username cap; admin reset clears it.
+- Password minimum 8 for new and changed passwords (old 6-character passwords can still log in).
+- Image uploads (profile, cover, chat) must match the claimed JPEG/PNG/WebP bytes.
+- Open play ranked games: both teams must confirm a score; repeat-group damping applies; flags show in the admin panel.
+- `.gitignore` named correctly; no stray root `sw.js` or placeholder files.
+- Service worker cache is capped at 120 entries (new in v8.32.3).
+- HSTS, Permissions-Policy and CSP (Report-Only) set in `netlify.toml`.
 
-## Changed in this release
-- `netlify.toml`: PNG icons and OG image now cached (same policy as webp).
-- `package.json`: name `the-system` -> `pickleup` (Blobs store name unchanged on purpose, so existing data is kept).
-- `AUDIT.md`: replaced the stale v7.2 text.
-
-## Not done / your action
-1. **Set `SESSION_SECRET` and `ADMIN_PASSWORD`** in Netlify > Site settings > Environment variables, then redeploy. Without `ADMIN_PASSWORD` there is no admin.
-2. **Add `google82857a2dad063ae9.html`** to `public/` (re-download from Search Console). It was not in the upload.
-3. **CSP**: after a week with no console warnings, rename `Content-Security-Policy-Report-Only` to `Content-Security-Policy`.
-4. **Custom domain**: replace `pickleup.netlify.app` in `index.html`, the 2 static pages, `robots.txt`, `sitemap.xml`.
-5. **UI tests** (`ui.test.mjs`) need jsdom and were not run here: run `npm install && npm test` once.
-6. In Admin, set Facility time zone to `Asia/Manila` if it was saved as `UTC`.
-7. `README.md` is a long product description from an older repo; trim or rewrite when convenient.
-
-## Known limits
-- `public/index.html` is ~200 KB in one file (inline JS/CSS). Fine for now; gzip on Netlify cuts it substantially. Splitting it is the next optimization, but risky without UI tests.
-- No live-deploy or real-device testing was done.
+## Open
+1. **Enforce the CSP:** after a week of clean console logs, rename `Content-Security-Policy-Report-Only` to `Content-Security-Policy` in `netlify.toml`. It still needs `'unsafe-inline'`.
+2. Session token in `localStorage` (long term: `HttpOnly` cookie). Not re-checked.
+3. Leaderboard and directory read every user record; add an index before growth. Not re-checked.
+4. OpenStreetMap Nominatim and tile usage policies. Not re-checked.
+5. Search Console verification, custom domain, PageSpeed on the live site.
+6. Self-host Google Fonts; compress `logo.png` and `icon-512.png`.

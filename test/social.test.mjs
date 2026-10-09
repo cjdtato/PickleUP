@@ -59,7 +59,9 @@ test("open play: join, pay, shuffled queue, scores, ranking", async () => {
   assert.equal((await call("opPaid", { id, pid: ID.ann }, "ann")).status, 403, "only the host confirms payment");
   for (const n of ["ann", "bob", "cyd", "dee", "eve"]) await call("opPaid", { id, pid: ID[n] }, "hosty");
   assert.equal((await call("opStart", { id }, "hosty")).status, 400, "paid, but nobody has scanned in yet");
-  await arrive(id, ["ann", "bob", "cyd", "dee", "fay"]); // eve paid but never scanned; fay scanned but never paid
+  await arrive(id, ["ann", "bob", "cyd", "dee"]); // eve paid but never scanned
+  assert.equal((await call("opCheckin", { id, code: (await call("opCode", { id }, "hosty")).body.code }, "fay")).status, 400, "fay has not paid, so she cannot check in");
+  assert.equal((await call("opArrive", { id, pid: ID.fay }, "hosty")).status, 400, "the host cannot check in an unpaid player either");
   assert.equal((await call("opStart", { id }, "ann")).status, 403, "only the host starts");
   await call("opHostIn", { id: id }, "hosty");
   let od = (await call("opStart", { id }, "hosty")).body.od;
@@ -420,4 +422,23 @@ test("open play settings: fixed pairing and player swapping are host options, of
   const on0 = od.g.find(g => g.st === "p");
   assert.equal((await call("opSwap", { id: on.id, gid: on0.id, out: on0.p[0], in: ID.dee }, "hosty")).status, 400, "games on court cannot be changed");
   assert.equal((await call("opUnpair", { id: on.id, pid: ID.ann }, "hosty")).status, 200);
+});
+
+test("open play: check-in needs payment first, pairs need paid and checked-in players, host can switch options on later", async () => {
+  const { ID, call, club, arrive } = await setup();
+  const od = (await call("opCreate", { club, title: "Paid first", loc: "Riverside Courts", ts: Date.now() + 36e5, price: 500, pay: "GCash 0917", cap: 20, courts: 1, rounds: 3, fp: true }, "hosty")).body.od, id = od.id;
+  for (const n of ["ann", "bob", "cyd"]) await call("opJoin", { id }, n);
+  const scan = async n => (await call("opCheckin", { id, code: (await call("opCode", { id }, "hosty")).body.code }, n)).status;
+  assert.equal(await scan("ann"), 400, "unpaid players cannot scan in");
+  assert.equal((await call("opArrive", { id, pid: ID.ann }, "hosty")).status, 400, "the host cannot check in an unpaid player");
+  for (const n of ["ann", "bob"]) await call("opPaid", { id, pid: ID[n] }, "hosty");
+  assert.equal((await call("opPair", { id, a: ID.ann, b: ID.bob }, "hosty")).status, 400, "paid but not checked in");
+  await arrive(id, ["ann", "bob"]);
+  assert.equal((await call("opPair", { id, a: ID.ann, b: ID.cyd }, "hosty")).status, 400, "cyd has not paid");
+  assert.equal((await call("opPair", { id, a: ID.ann, b: ID.bob }, "hosty")).status, 200, "paid and checked in");
+  const od2 = (await call("opPaid", { id, pid: ID.bob }, "hosty")).body.od; // unpay bob
+  assert.equal(od2.pairs.length, 0, "unpaying removes the pair");
+  assert.equal(od2.pl.find(p => p.id === ID.bob).here, false, "and checks them out");
+  assert.equal((await call("opOpt", { id, k: "sw" }, "ann")).status, 403, "only the host");
+  assert.equal((await call("opOpt", { id, k: "sw" }, "hosty")).body.od.sw, true, "swap switched on after creation");
 });
